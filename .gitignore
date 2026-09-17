@@ -1,0 +1,28 @@
+# Zephyr build directories
+build/
+build_*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Sensor/BSEC implementation - intentionally not distributed
+src/sensor_bme680.c
+src/sensor_bme680.h
+src/bsec_storage.c
+src/bsec_storage.h
+
+# Third-party sensor/BSEC dependencies - intentionally not distributed
+external/
