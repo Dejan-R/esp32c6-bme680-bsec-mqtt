@@ -30,8 +30,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/led_strip.h>
 
 #include <zephyr/net/tls_credentials.h>
+#include <zephyr/data/json.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -49,8 +52,12 @@
 #define USE_SECURE_MQTT 1
 #define TLS_SEC_TAG_ID  1
 
-#define MQTT_SENSOR_TOPIC "your/mqtt/topic"
+#define MQTT_SENSOR_TOPIC "pombal/ESP32/sensor1/data"
 #define DEVICE_ID         "pombal-esp32-01"
+
+#define RGB_LED_NODE DT_ALIAS(led_strip)
+
+static const struct device *const rgb_led = DEVICE_DT_GET(RGB_LED_NODE);
 
 #if USE_SECURE_MQTT
 
@@ -61,7 +68,7 @@ static const mqtt_manager_config_t my_mqtt_config = {
     .client_id = "pombal-esp32-01",
     .username = "YOUR_MQTT_USERNAME",
     .password = "YOUR_MQTT_PASSWORD",
-    .subscribe_topic = "your/mqtt/subscribe/topic",
+    .subscribe_topic = "zephyr/test",
     .keepalive = 60,
     .qos = MQTT_QOS_1_AT_LEAST_ONCE,
     .tls_sec_tag = TLS_SEC_TAG_ID
@@ -76,13 +83,11 @@ static const mqtt_manager_config_t my_mqtt_config = {
     .client_id = "pombal-esp32-01",
     .username = "YOUR_MQTT_USERNAME",
     .password = "YOUR_MQTT_PASSWORD",
-    .subscribe_topic = "your/mqtt/subscribe/topic",
+    .subscribe_topic = "zephyr/test",
     .keepalive = 60,
     .qos = MQTT_QOS_0_AT_MOST_ONCE,
     .tls_sec_tag = -1
 };
-
-#endif
 
 
 /* 
@@ -352,11 +357,97 @@ static void print_sensor_data(
     );
 }
 
+/* MQTT RX CALLBACK */
+struct rgb_command {
+    int32_t r;
+    int32_t g;
+    int32_t b;
+};
 
+static const struct json_obj_descr rgb_command_descr[] = {
+    JSON_OBJ_DESCR_PRIM(struct rgb_command, r, JSON_TOK_NUMBER),
+    JSON_OBJ_DESCR_PRIM(struct rgb_command, g, JSON_TOK_NUMBER),
+    JSON_OBJ_DESCR_PRIM(struct rgb_command, b, JSON_TOK_NUMBER),
+};
+
+static void mqtt_message_received(const char *topic,
+                                  const char *payload)
+{
+    struct rgb_command cmd = {0};
+    struct led_rgb color = {0};
+    int ret;
+
+    printk("[APP] MQTT RX topic: %s\n", topic);
+    printk("[APP] MQTT RX payload: %s\n", payload);
+
+char json_buf[128];
+
+size_t payload_len = strlen(payload);
+
+if (payload_len >= sizeof(json_buf)) {
+    printk("[APP] RGB JSON payload too long\n");
+    return;
+}
+
+memcpy(json_buf, payload, payload_len + 1);
+
+ret = json_obj_parse(json_buf,
+                     payload_len,
+                     rgb_command_descr,
+                     ARRAY_SIZE(rgb_command_descr),
+                     &cmd);
+
+    if (ret < 0) {
+        printk("[APP] Invalid RGB JSON: %d\n", ret);
+        return;
+    }
+
+    if ((cmd.r < 0) || (cmd.r > 255) ||
+        (cmd.g < 0) || (cmd.g > 255) ||
+        (cmd.b < 0) || (cmd.b > 255)) {
+        printk("[APP] RGB values out of range\n");
+        return;
+    }
+
+    color.r = (uint8_t)cmd.r;
+    color.g = (uint8_t)cmd.g;
+    color.b = (uint8_t)cmd.b;
+
+    ret = led_strip_update_rgb(rgb_led, &color, 1);
+
+    if (ret != 0) {
+        printk("[APP] RGB LED update FAILED: %d\n", ret);
+        return;
+    }
+
+    printk("[APP] RGB LED -> R:%d G:%d B:%d\n",
+           (int)cmd.r,
+           (int)cmd.g,
+           (int)cmd.b);
+}
 
 int main(void)
 {
     int ret;
+        if (!device_is_ready(rgb_led)) {
+        printk("[APP] RGB LED device NOT READY\n");
+        return -ENODEV;
+    }
+
+    printk("[APP] RGB LED READY\n");
+
+    struct led_rgb off = {
+        .r = 0,
+        .g = 0,
+        .b = 0
+    };
+
+    ret = led_strip_update_rgb(rgb_led, &off, 1);
+
+    if (ret != 0) {
+        printk("[APP] RGB LED initialization FAILED: %d\n", ret);
+        return ret;
+    }
 
     printk("\n");
     printk(
@@ -421,21 +512,24 @@ int main(void)
 
 
   /* 4. MQTT MANAGER */
-    ret =
-        mqtt_manager_init(
-            &my_mqtt_config
-        );
+mqtt_manager_set_message_callback(mqtt_message_received);
 
-    if (ret != 0) {
-        printk(
-            "[APP] MQTT manager initialization FAILED: %d\n",
-            ret
-        );
-        return ret;
-    }
-    printk(
-        "[APP] MQTT manager started\n"
+ret =
+    mqtt_manager_init(
+        &my_mqtt_config
     );
+
+if (ret != 0) {
+    printk(
+        "[APP] MQTT manager initialization FAILED: %d\n",
+        ret
+    );
+    return ret;
+}
+
+printk(
+    "[APP] MQTT manager started\n"
+);
     printk("\n");
     printk(
         "[APP] Application running...\n"

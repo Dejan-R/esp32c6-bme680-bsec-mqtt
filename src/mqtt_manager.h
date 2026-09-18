@@ -39,6 +39,10 @@
   sec_tag_t tls_sec_tag;
 
 } mqtt_manager_config_t;
+typedef void (*mqtt_manager_message_cb_t)(const char *topic,
+                                          const char *payload);
+
+void mqtt_manager_set_message_callback(mqtt_manager_message_cb_t callback);
 
   int mqtt_manager_init(const mqtt_manager_config_t *cfg);
 

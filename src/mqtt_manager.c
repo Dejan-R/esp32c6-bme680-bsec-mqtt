@@ -29,6 +29,7 @@ static mqtt_manager_config_t       mqtt_cfg;
 static struct zsock_pollfd         fds[1];
 static volatile mqtt_manager_state_t mqtt_state = MQTT_STATE_DISCONNECTED;
 static uint16_t                    global_message_id = 0;
+static mqtt_manager_message_cb_t message_callback = NULL;
 #if defined(CONFIG_MQTT_LIB_TLS)
 static sec_tag_t secure_tag_list[1];
 #endif
@@ -89,6 +90,22 @@ case MQTT_EVT_CONNACK:
                        pub->message.topic.topic.size,
                        pub->message.topic.topic.utf8,
                        payload);
+
+                       if (message_callback != NULL) {
+    char topic[128];
+
+    size_t topic_len = MIN(pub->message.topic.topic.size,
+                           sizeof(topic) - 1);
+
+    memcpy(topic,
+           pub->message.topic.topic.utf8,
+           topic_len);
+
+    topic[topic_len] = '\0';
+
+    message_callback(topic, (const char *)payload);
+}
+
                        if (pub->message.topic.qos ==
     MQTT_QOS_1_AT_LEAST_ONCE) {
     struct mqtt_puback_param ack = {
@@ -131,7 +148,7 @@ static int broker_init(void)
     int ret = zsock_getaddrinfo(mqtt_cfg.broker_address, port_str, &hints, &res);
     if (ret != 0) {
         printk("[MQTT MGMT] DNS resolution failed: %d\n", ret);
-        return -EIO;
+        return ret;
     }
     memcpy(&broker, res->ai_addr, res->ai_addrlen);
     zsock_freeaddrinfo(res);
@@ -248,6 +265,11 @@ static int execute_publish(const char *topic, const char *payload)
 bool mqtt_manager_is_ready(void)
 {
     return (mqtt_state == MQTT_STATE_READY);
+}
+
+void mqtt_manager_set_message_callback(mqtt_manager_message_cb_t callback)
+{
+    message_callback = callback;
 }
 
 mqtt_manager_state_t mqtt_manager_get_state(void)

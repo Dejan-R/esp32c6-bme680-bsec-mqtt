@@ -8,6 +8,7 @@
 #include <zephyr/sys/printk.h>
 #include <string.h>
 
+
 #define WIFI_SSID "YOUR_WIFI_SSID"
 #define WIFI_PASS "YOUR_WIFI_PASSWORD"
 #define RECONNECT_DELAY_SEC 5
@@ -87,6 +88,7 @@ static void net_event_handler(struct net_mgmt_event_callback *cb, uint64_t event
     
     else if (event == NET_EVENT_L4_CONNECTED) {
         printk("[WiFi Mgr] L4 Connected! IP Address is active and valid.\n");
+       
         set_state(WFM_STATE_READY);
     }
     else if (event == NET_EVENT_L4_DISCONNECTED) {
