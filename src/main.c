@@ -1,5 +1,4 @@
-
- /*
+/*
  * Pombal IoT Workshop Demo
  *
  * ESP32-C6 + BME680 + Bosch BSEC + Zephyr RTOS
@@ -24,17 +23,19 @@
  *
  *
  * Bosch BSEC dependency:
- * Bosch BSEC is required to build this project but is not distributed with the project. 
+ * Bosch BSEC is required to build this project but is not distributed with the project.
  * It must be obtained separately from Bosch Sensortec and used according to the applicable Bosch license terms.
  */
 
+#include <zephyr/settings/settings.h>
+#include <zephyr/shell/shell.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/led_strip.h>
-
 #include <zephyr/net/tls_credentials.h>
 #include <zephyr/data/json.h>
+#include <zephyr/sys/util.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,57 +43,37 @@
 #include <string.h>
 #include <errno.h>
 
+#include "wifi_config.h"
 #include "sensor_bme680.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "ca_cert.h"
+#include "app_secrets.h"
 
 
- // MQTT CONFIGURATION
-#define USE_SECURE_MQTT 1
 #define TLS_SEC_TAG_ID  1
 
-#define MQTT_SENSOR_TOPIC "pombal/ESP32/sensor1/data"
-#define DEVICE_ID         "pombal-esp32-01"
+#define MQTT_SENSOR_TOPIC APP_MQTT_PUBLISH_TOPIC
+#define DEVICE_ID         APP_DEVICE_ID
 
 #define RGB_LED_NODE DT_ALIAS(led_strip)
 
 static const struct device *const rgb_led = DEVICE_DT_GET(RGB_LED_NODE);
 
-#if USE_SECURE_MQTT
 
 static const mqtt_manager_config_t my_mqtt_config = {
-    .broker_address = "your-broker.example.com",
-    .broker_port = 8883,
+    .broker_address = APP_MQTT_BROKER_ADDRESS,
+    .broker_port = APP_MQTT_BROKER_PORT,
     .transport = MQTT_MANAGER_TRANSPORT_TLS,
-    .client_id = "pombal-esp32-01",
-    .username = "YOUR_MQTT_USERNAME",
-    .password = "YOUR_MQTT_PASSWORD",
-    .subscribe_topic = "zephyr/test",
+    .client_id = APP_MQTT_CLIENT_ID,
+    .username = APP_MQTT_USERNAME,
+    .password = APP_MQTT_PASSWORD,
+    .subscribe_topic = APP_MQTT_SUBSCRIBE_TOPIC,
     .keepalive = 60,
     .qos = MQTT_QOS_1_AT_LEAST_ONCE,
     .tls_sec_tag = TLS_SEC_TAG_ID
 };
 
-#else
-
-static const mqtt_manager_config_t my_mqtt_config = {
-    .broker_address = "YOUR_BROKER_IP",
-    .broker_port = 1883,
-    .transport = MQTT_MANAGER_TRANSPORT_TCP,
-    .client_id = "pombal-esp32-01",
-    .username = "YOUR_MQTT_USERNAME",
-    .password = "YOUR_MQTT_PASSWORD",
-    .subscribe_topic = "zephyr/test",
-    .keepalive = 60,
-    .qos = MQTT_QOS_0_AT_MOST_ONCE,
-    .tls_sec_tag = -1
-};
-
-
-/* 
- * FLOAT -> STRING
-*/
 static int float_to_string(
     char *buffer,
     size_t buffer_size,
@@ -100,27 +81,28 @@ static int float_to_string(
     uint8_t decimals)
 {
     int32_t multiplier = 1;
-    for (uint8_t i = 0;
-         i < decimals;
-         i++) {
+
+    for (uint8_t i = 0; i < decimals; i++) {
         multiplier *= 10;
     }
 
-    float scaled_f =value * (float)multiplier;
+    float scaled_f = value * (float)multiplier;
     int32_t scaled;
+
     if (scaled_f >= 0.0f) {
-        scaled =(int32_t)(scaled_f + 0.5f);
-    }
-    else {
-        scaled =(int32_t)(scaled_f - 0.5f);
-    }
-    bool negative = (scaled < 0);
-    if (negative) {
-         scaled =-scaled;
+        scaled = (int32_t)(scaled_f + 0.5f);
+    } else {
+        scaled = (int32_t)(scaled_f - 0.5f);
     }
 
-    int32_t whole =  scaled / multiplier;
-    int32_t fraction =  scaled % multiplier;
+    bool negative = (scaled < 0);
+
+    if (negative) {
+        scaled = -scaled;
+    }
+
+    int32_t whole = scaled / multiplier;
+    int32_t fraction = scaled % multiplier;
 
     if (decimals == 0) {
         return snprintk(
@@ -131,6 +113,7 @@ static int float_to_string(
             whole
         );
     }
+
     return snprintk(
         buffer,
         buffer_size,
@@ -143,24 +126,6 @@ static int float_to_string(
 }
 
 
-/* ============================================================
- * CREATE SENSOR JSON
- *
- * Format:
- *
- * {
- *   "device": "pombal-esp32-01",
- *   "temperature_c": 24.21149,
- *   "humidity_pct": 55.54113,
- *   "pressure_kpa": 100.5488,
- *   "iaq": 50,
- *   "iaq_accuracy": 0,
- *   "co2_equivalent_ppm": 500,
- *   "bvoc_equivalent_ppm": 0.5
- * }
- * ============================================================
- */
-
 static int create_sensor_json(
     char *json,
     size_t json_size,
@@ -172,6 +137,7 @@ static int create_sensor_json(
     char iaq[24];
     char co2[24];
     char bvoc[24];
+
     float_to_string(
         temperature,
         sizeof(temperature),
@@ -239,10 +205,8 @@ static int create_sensor_json(
         bvoc
     );
 
-
     if ((len < 0) ||
         ((size_t)len >= json_size)) {
-
         return -ENOMEM;
     }
 
@@ -250,15 +214,16 @@ static int create_sensor_json(
 }
 
 
- /* PRINT SENSOR DATA */
 static void print_sensor_data(
     const struct sensor_bme680_data *data)
 {
     char value[24];
+
     printk("\n");
     printk(
         "-------- BME680 / BSEC --------\n"
     );
+
     float_to_string(
         value,
         sizeof(value),
@@ -282,7 +247,6 @@ static void print_sensor_data(
         "Pressure        : %s kPa\n",
         value
     );
-
 
     float_to_string(
         value,
@@ -325,7 +289,7 @@ static void print_sensor_data(
     printk(
         "IAQ accuracy    : %u (%s)\n",
         data->iaq_accuracy,
-        sensor_bme680_iaq_status_text()
+        sensor_bme680_iaq_status_text(data->iaq_accuracy)
     );
 
     float_to_string(
@@ -340,7 +304,6 @@ static void print_sensor_data(
         value
     );
 
-
     float_to_string(
         value,
         sizeof(value),
@@ -352,60 +315,162 @@ static void print_sensor_data(
         "Breath VOC eq   : %s ppm\n",
         value
     );
+
     printk(
         "--------------------------------\n"
     );
 }
 
-/* MQTT RX CALLBACK */
+
+static int cmd_sensor_status(
+    const struct shell *sh,
+    size_t argc,
+    char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    struct sensor_bme680_data data;
+
+    int ret = sensor_bme680_get_data(&data);
+
+    if (ret != 0) {
+        shell_error(
+            sh,
+            "Sensor data not available."
+        );
+
+        return ret;
+    }
+
+    print_sensor_data(&data);
+
+    return 0;
+}
+
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+    sub_sensor,
+
+    SHELL_CMD(
+        status,
+        NULL,
+        "Show current BME680/BSEC data",
+        cmd_sensor_status
+    ),
+
+    SHELL_SUBCMD_SET_END
+);
+
+
+SHELL_CMD_REGISTER(
+    sensor,
+    &sub_sensor,
+    "Sensor commands",
+    NULL
+);
+
+
 struct rgb_command {
     int32_t r;
     int32_t g;
     int32_t b;
 };
 
+
 static const struct json_obj_descr rgb_command_descr[] = {
-    JSON_OBJ_DESCR_PRIM(struct rgb_command, r, JSON_TOK_NUMBER),
-    JSON_OBJ_DESCR_PRIM(struct rgb_command, g, JSON_TOK_NUMBER),
-    JSON_OBJ_DESCR_PRIM(struct rgb_command, b, JSON_TOK_NUMBER),
+    JSON_OBJ_DESCR_PRIM(
+        struct rgb_command,
+        r,
+        JSON_TOK_NUMBER
+    ),
+
+    JSON_OBJ_DESCR_PRIM(
+        struct rgb_command,
+        g,
+        JSON_TOK_NUMBER
+    ),
+
+    JSON_OBJ_DESCR_PRIM(
+        struct rgb_command,
+        b,
+        JSON_TOK_NUMBER
+    ),
 };
 
-static void mqtt_message_received(const char *topic,
-                                  const char *payload)
+
+static void mqtt_message_received(
+    const char *topic,
+    const char *payload)
 {
     struct rgb_command cmd = {0};
     struct led_rgb color = {0};
     int ret;
 
-    printk("[APP] MQTT RX topic: %s\n", topic);
-    printk("[APP] MQTT RX payload: %s\n", payload);
+    printk(
+        "[APP] MQTT RX topic: %s\n",
+        topic
+    );
 
-char json_buf[128];
+    printk(
+        "[APP] MQTT RX payload: %s\n",
+        payload
+    );
 
-size_t payload_len = strlen(payload);
+    char json_buf[128];
 
-if (payload_len >= sizeof(json_buf)) {
-    printk("[APP] RGB JSON payload too long\n");
-    return;
-}
+    size_t payload_len = strlen(payload);
 
-memcpy(json_buf, payload, payload_len + 1);
+    if (payload_len >= sizeof(json_buf)) {
+        printk(
+            "[APP] RGB JSON payload too long\n"
+        );
 
-ret = json_obj_parse(json_buf,
-                     payload_len,
-                     rgb_command_descr,
-                     ARRAY_SIZE(rgb_command_descr),
-                     &cmd);
+        return;
+    }
 
-    if (ret < 0) {
-        printk("[APP] Invalid RGB JSON: %d\n", ret);
+    memcpy(
+        json_buf,
+        payload,
+        payload_len + 1
+    );
+
+    int64_t parsed_fields = json_obj_parse(
+        json_buf,
+        payload_len,
+        rgb_command_descr,
+        ARRAY_SIZE(rgb_command_descr),
+        &cmd
+    );
+
+    if (parsed_fields < 0) {
+        printk(
+            "[APP] Invalid RGB JSON: %d\n",
+            (int)parsed_fields
+        );
+
+        return;
+    }
+
+    const int64_t required_fields =
+        (1LL << ARRAY_SIZE(rgb_command_descr)) - 1LL;
+
+    if ((parsed_fields & required_fields) != required_fields) {
+        printk(
+            "[APP] RGB JSON must contain r, g and b\n"
+        );
+
         return;
     }
 
     if ((cmd.r < 0) || (cmd.r > 255) ||
         (cmd.g < 0) || (cmd.g > 255) ||
         (cmd.b < 0) || (cmd.b > 255)) {
-        printk("[APP] RGB values out of range\n");
+
+        printk(
+            "[APP] RGB values out of range\n"
+        );
+
         return;
     }
 
@@ -413,28 +478,67 @@ ret = json_obj_parse(json_buf,
     color.g = (uint8_t)cmd.g;
     color.b = (uint8_t)cmd.b;
 
-    ret = led_strip_update_rgb(rgb_led, &color, 1);
+    ret = led_strip_update_rgb(
+        rgb_led,
+        &color,
+        1
+    );
 
     if (ret != 0) {
-        printk("[APP] RGB LED update FAILED: %d\n", ret);
+        printk(
+            "[APP] RGB LED update FAILED: %d\n",
+            ret
+        );
+
         return;
     }
 
-    printk("[APP] RGB LED -> R:%d G:%d B:%d\n",
-           (int)cmd.r,
-           (int)cmd.g,
-           (int)cmd.b);
+    printk(
+        "[APP] RGB LED -> R:%d G:%d B:%d\n",
+        (int)cmd.r,
+        (int)cmd.g,
+        (int)cmd.b
+    );
 }
+
 
 int main(void)
 {
     int ret;
-        if (!device_is_ready(rgb_led)) {
-        printk("[APP] RGB LED device NOT READY\n");
+
+    ret = settings_subsys_init();
+
+    if (ret != 0) {
+        printk(
+            "[APP] Settings initialization FAILED: %d\n",
+            ret
+        );
+
+        return ret;
+    }
+
+    ret = wifi_config_init();
+
+    if (ret != 0) {
+        printk(
+            "[APP] WiFi configuration initialization FAILED: %d\n",
+            ret
+        );
+
+        return ret;
+    }
+
+    if (!device_is_ready(rgb_led)) {
+        printk(
+            "[APP] RGB LED device NOT READY\n"
+        );
+
         return -ENODEV;
     }
 
-    printk("[APP] RGB LED READY\n");
+    printk(
+        "[APP] RGB LED READY\n"
+    );
 
     struct led_rgb off = {
         .r = 0,
@@ -442,57 +546,65 @@ int main(void)
         .b = 0
     };
 
-    ret = led_strip_update_rgb(rgb_led, &off, 1);
+    ret = led_strip_update_rgb(
+        rgb_led,
+        &off,
+        1
+    );
 
     if (ret != 0) {
-        printk("[APP] RGB LED initialization FAILED: %d\n", ret);
+        printk(
+            "[APP] RGB LED initialization FAILED: %d\n",
+            ret
+        );
+
         return ret;
     }
 
     printk("\n");
+
     printk(
         "========================================\n"
     );
+
     printk(
         " ESP32-C6 + BME680 + BSEC + WiFi + MQTT\n"
     );
+
     printk(
         "========================================\n"
     );
 
-
-     /* 1. BME680 + BSEC */
     ret = sensor_bme680_init();
+
     if (ret != 0) {
         printk(
             "[APP] BME680/BSEC initialization FAILED: %d\n",
             ret
         );
+
         return ret;
     }
-
 
     printk(
         "[APP] BME680/BSEC READY\n"
     );
 
-       /* 2. WIFI */
     printk(
         "[APP] Starting WiFi manager...\n"
     );
+
     wifi_manager_init();
 
-
-       /* 3. TLS CA CERTIFICATE */
     if (my_mqtt_config.transport ==
         MQTT_MANAGER_TRANSPORT_TLS) {
-        ret =
-            tls_credential_add(
-                TLS_SEC_TAG_ID,
-                TLS_CREDENTIAL_CA_CERTIFICATE,
-                ca_certificate,
-                sizeof(ca_certificate)
-            );
+
+        ret = tls_credential_add(
+            TLS_SEC_TAG_ID,
+            TLS_CREDENTIAL_CA_CERTIFICATE,
+            ca_certificate,
+            sizeof(ca_certificate)
+        );
 
         if ((ret < 0) &&
             (ret != -EALREADY)) {
@@ -501,78 +613,87 @@ int main(void)
                 "[APP] Failed to add CA certificate: %d\n",
                 ret
             );
+
             return ret;
         }
+
         printk(
             "[APP] CA certificate registered on tag %d\n",
             TLS_SEC_TAG_ID
         );
     }
 
+    mqtt_manager_set_message_callback(
+        mqtt_message_received
+    );
 
-
-  /* 4. MQTT MANAGER */
-mqtt_manager_set_message_callback(mqtt_message_received);
-
-ret =
-    mqtt_manager_init(
+    ret = mqtt_manager_init(
         &my_mqtt_config
     );
 
-if (ret != 0) {
-    printk(
-        "[APP] MQTT manager initialization FAILED: %d\n",
-        ret
-    );
-    return ret;
-}
+    if (ret != 0) {
+        printk(
+            "[APP] MQTT manager initialization FAILED: %d\n",
+            ret
+        );
 
-printk(
-    "[APP] MQTT manager started\n"
-);
+        return ret;
+    }
+
+    printk(
+        "[APP] MQTT manager started\n"
+    );
+
     printk("\n");
+
     printk(
         "[APP] Application running...\n"
     );
+
     printk("\n");
 
-  
-     /* JSON BUFFER */
     char json[512];
 
-
     while (1) {
-         /* BME680 / BSEC UPDATE */
-        ret =sensor_bme680_update();
+
+        ret = sensor_bme680_update();
+
         if (ret < 0) {
             printk(
                 "[APP] sensor_bme680_update ERROR: %d\n",
                 ret
             );
+
             k_sleep(
                 K_MSEC(500)
             );
+
             continue;
         }
 
-         /* NEW BSEC DATA */
         if (ret > 0) {
-            const struct sensor_bme680_data *data =
-                sensor_bme680_get_data();
-    
-             /* LOCAL SERIAL OUTPUT */
-            print_sensor_data(
-                data
-            );
 
-            /* MQTT */
+            struct sensor_bme680_data data;
+
+            ret = sensor_bme680_get_data(&data);
+
+            if (ret != 0) {
+                printk(
+                    "[APP] Sensor snapshot unavailable: %d\n",
+                    ret
+                );
+
+                sensor_bme680_clear_new_data_flag();
+                continue;
+            }
+
             if (mqtt_manager_is_ready()) {
 
                 int json_len =
                     create_sensor_json(
                         json,
                         sizeof(json),
-                        data
+                        &data
                     );
 
                 if (json_len < 0) {
@@ -581,28 +702,15 @@ printk(
                         "[APP] JSON creation FAILED: %d\n",
                         json_len
                     );
-                }
-                else {
 
-                    printk(
-                        "[APP] MQTT TX topic: %s\n",
-                        MQTT_SENSOR_TOPIC
-                    );
+                } else {
 
-
-                    printk(
-                        "[APP] MQTT TX payload: %s\n",
+                    ret = mqtt_manager_publish(
+                        MQTT_SENSOR_TOPIC,
                         json
                     );
-                    ret =
-                        mqtt_manager_publish(
-                            MQTT_SENSOR_TOPIC,
-                            json
-                        );
-
 
                     if (ret != 0) {
-
                         printk(
                             "[APP] MQTT publish queue FAILED: %d\n",
                             ret
@@ -610,19 +718,14 @@ printk(
                     }
                 }
             }
-            else {
 
-                printk(
-                    "[APP] MQTT not ready - measurement not published\n"
-                );
-            }
-
-             /* CLEAR SENSOR NEW-DATA FLAG */
             sensor_bme680_clear_new_data_flag();
         }
+
         k_sleep(
             K_MSEC(20)
         );
     }
+
     return 0;
 }

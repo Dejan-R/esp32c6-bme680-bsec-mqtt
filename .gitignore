@@ -26,3 +26,6 @@ src/bsec_storage.h
 
 # Third-party sensor/BSEC dependencies - intentionally not distributed
 external/
+
+# Local secrets - never commit
+src/app_secrets.h

@@ -7,7 +7,7 @@ project(mqtt_bme680_bsec)
 
 target_sources(app PRIVATE
     src/main.c
-
+    src/wifi_config.c
     src/sensor_bme680.c
     src/bsec_storage.c
 
